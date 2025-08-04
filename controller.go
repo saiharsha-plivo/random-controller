@@ -18,32 +18,32 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"time"
 
 	"golang.org/x/time/rate"
 
-	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
-	appsinformers "k8s.io/client-go/informers/apps/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
 	typedcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
-	appslisters "k8s.io/client-go/listers/apps/v1"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
 
-	samplev1alpha1 "k8s.io/sample-controller/pkg/apis/samplecontroller/v1alpha1"
-	clientset "k8s.io/sample-controller/pkg/generated/clientset/versioned"
-	samplescheme "k8s.io/sample-controller/pkg/generated/clientset/versioned/scheme"
-	informers "k8s.io/sample-controller/pkg/generated/informers/externalversions/samplecontroller/v1alpha1"
-	listers "k8s.io/sample-controller/pkg/generated/listers/samplecontroller/v1alpha1"
+	"github.com/saiharsha/random-controller/pkg/apis/randomcontroller/v1beta1"
+	clientset "github.com/saiharsha/random-controller/pkg/generated/clientset/versioned"
+	samplescheme "github.com/saiharsha/random-controller/pkg/generated/clientset/versioned/scheme"
+	informers "github.com/saiharsha/random-controller/pkg/generated/informers/externalversions/randomcontroller/v1beta1"
+	listers "github.com/saiharsha/random-controller/pkg/generated/listers/randomcontroller/v1beta1"
 )
 
 const controllerAgentName = "sample-controller"
@@ -57,10 +57,10 @@ const (
 
 	// MessageResourceExists is the message used for Events when a resource
 	// fails to sync due to a Deployment already existing
-	MessageResourceExists = "Resource %q already exists and is not managed by Foo"
+	MessageResourceExists = "Resource %q already exists and is not managed by Randomitem"
 	// MessageResourceSynced is the message used for an Event fired when a Foo
 	// is synced successfully
-	MessageResourceSynced = "Foo synced successfully"
+	MessageResourceSynced = "Randomitem synced successfully"
 	// FieldManager distinguishes this controller from other things writing to API objects
 	FieldManager = controllerAgentName
 )
@@ -70,13 +70,11 @@ type Controller struct {
 	// kubeclientset is a standard kubernetes clientset
 	kubeclientset kubernetes.Interface
 	// sampleclientset is a clientset for our own API group
-	sampleclientset clientset.Interface
+	randomclientset clientset.Interface
 
-	deploymentsLister appslisters.DeploymentLister
-	deploymentsSynced cache.InformerSynced
-	foosLister        listers.FooLister
-	foosSynced        cache.InformerSynced
-
+	randomItemLister  listers.RandomItemLister
+	randomItemsSynced cache.InformerSynced
+	apiKey            string
 	// workqueue is a rate limited work queue. This is used to queue work to be
 	// processed instead of performing it as soon as a change happens. This
 	// means we can ensure we only process a fixed amount of resources at a
@@ -92,9 +90,9 @@ type Controller struct {
 func NewController(
 	ctx context.Context,
 	kubeclientset kubernetes.Interface,
-	sampleclientset clientset.Interface,
-	deploymentInformer appsinformers.DeploymentInformer,
-	fooInformer informers.FooInformer) *Controller {
+	randomclientset clientset.Interface,
+	apiKey string,
+	randomItemInformer informers.RandomItemInformer) *Controller {
 	logger := klog.FromContext(ctx)
 
 	// Create event broadcaster
@@ -114,42 +112,30 @@ func NewController(
 
 	controller := &Controller{
 		kubeclientset:     kubeclientset,
-		sampleclientset:   sampleclientset,
-		deploymentsLister: deploymentInformer.Lister(),
-		deploymentsSynced: deploymentInformer.Informer().HasSynced,
-		foosLister:        fooInformer.Lister(),
-		foosSynced:        fooInformer.Informer().HasSynced,
+		randomclientset:   randomclientset,
+		randomItemLister:  randomItemInformer.Lister(),
+		randomItemsSynced: randomItemInformer.Informer().HasSynced,
+		apiKey:            apiKey,
 		workqueue:         workqueue.NewTypedRateLimitingQueue(ratelimiter),
 		recorder:          recorder,
 	}
 
 	logger.Info("Setting up event handlers")
 	// Set up an event handler for when Foo resources change
-	fooInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc: controller.enqueueFoo,
+	randomItemInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc: controller.enqueueRandomItem,
 		UpdateFunc: func(old, new interface{}) {
-			controller.enqueueFoo(new)
-		},
-	})
-	// Set up an event handler for when Deployment resources change. This
-	// handler will lookup the owner of the given Deployment, and if it is
-	// owned by a Foo resource then the handler will enqueue that Foo resource for
-	// processing. This way, we don't need to implement custom logic for
-	// handling Deployment resources. More info on this pattern:
-	// https://github.com/kubernetes/community/blob/8cafef897a22026d42f5e5bb3f104febe7e29830/contributors/devel/controllers.md
-	deploymentInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc: controller.handleObject,
-		UpdateFunc: func(old, new interface{}) {
-			newDepl := new.(*appsv1.Deployment)
-			oldDepl := old.(*appsv1.Deployment)
-			if newDepl.ResourceVersion == oldDepl.ResourceVersion {
-				// Periodic resync will send update events for all known Deployments.
-				// Two different versions of the same Deployment will always have different RVs.
+
+			oldItem, ok1 := old.(*v1beta1.RandomItem)
+			newItem, ok2 := new.(*v1beta1.RandomItem)
+			if !ok1 || !ok2 {
 				return
 			}
-			controller.handleObject(new)
+
+			if oldItem.Spec.Item != newItem.Spec.Item {
+				controller.enqueueRandomItem(new)
+			}
 		},
-		DeleteFunc: controller.handleObject,
 	})
 
 	return controller
@@ -170,7 +156,7 @@ func (c *Controller) Run(ctx context.Context, workers int) error {
 	// Wait for the caches to be synced before starting workers
 	logger.Info("Waiting for informer caches to sync")
 
-	if ok := cache.WaitForCacheSync(ctx.Done(), c.deploymentsSynced, c.foosSynced); !ok {
+	if ok := cache.WaitForCacheSync(ctx.Done(), c.randomItemsSynced); !ok {
 		return fmt.Errorf("failed to wait for caches to sync")
 	}
 
@@ -242,11 +228,12 @@ func (c *Controller) syncHandler(ctx context.Context, objectRef cache.ObjectName
 	logger := klog.LoggerWithValues(klog.FromContext(ctx), "objectRef", objectRef)
 
 	// Get the Foo resource with this namespace/name
-	foo, err := c.foosLister.Foos(objectRef.Namespace).Get(objectRef.Name)
+	randomItem, err := c.randomItemLister.RandomItems(objectRef.Namespace).Get(objectRef.Name)
 	if err != nil {
 		// The Foo resource may no longer exist, in which case we stop
 		// processing.
 		if errors.IsNotFound(err) {
+			logger.Error(err, "Random Item not found")
 			utilruntime.HandleErrorWithContext(ctx, err, "Foo referenced by item in work queue no longer exists", "objectReference", objectRef)
 			return nil
 		}
@@ -254,81 +241,87 @@ func (c *Controller) syncHandler(ctx context.Context, objectRef cache.ObjectName
 		return err
 	}
 
-	deploymentName := foo.Spec.DeploymentName
-	if deploymentName == "" {
-		// We choose to absorb the error here as the worker would requeue the
-		// resource otherwise. Instead, the next time the resource is updated
-		// the resource will be queued again.
-		utilruntime.HandleErrorWithContext(ctx, nil, "Deployment name missing from object reference", "objectReference", objectRef)
+	item := randomItem.Spec.Item
+	statusItem := randomItem.Status.Item
+
+	if item == statusItem {
 		return nil
 	}
 
-	// Get the deployment with the name specified in Foo.spec
-	deployment, err := c.deploymentsLister.Deployments(foo.Namespace).Get(deploymentName)
-	// If the resource doesn't exist, we'll create it
-	if errors.IsNotFound(err) {
-		deployment, err = c.kubeclientset.AppsV1().Deployments(foo.Namespace).Create(ctx, newDeployment(foo), metav1.CreateOptions{FieldManager: FieldManager})
-	}
+	url := fmt.Sprintf("https://api.api-ninjas.com/v1/%ss", item)
+	value, err := c.getRandomValue(ctx, &url, &item)
 
-	// If an error occurs during Get/Create, we'll requeue the item so we can
-	// attempt processing again later. This could have been caused by a
-	// temporary network failure, or any other transient reason.
 	if err != nil {
 		return err
 	}
 
-	// If the Deployment is not controlled by this Foo resource, we should log
-	// a warning to the event recorder and return error msg.
-	if !metav1.IsControlledBy(deployment, foo) {
-		msg := fmt.Sprintf(MessageResourceExists, deployment.Name)
-		c.recorder.Event(foo, corev1.EventTypeWarning, ErrResourceExists, msg)
-		return fmt.Errorf("%s", msg)
-	}
-
-	// If this number of the replicas on the Foo resource is specified, and the
-	// number does not equal the current desired replicas on the Deployment, we
-	// should update the Deployment resource.
-	if foo.Spec.Replicas != nil && *foo.Spec.Replicas != *deployment.Spec.Replicas {
-		logger.V(4).Info("Update deployment resource", "currentReplicas", *deployment.Spec.Replicas, "desiredReplicas", *foo.Spec.Replicas)
-		deployment, err = c.kubeclientset.AppsV1().Deployments(foo.Namespace).Update(ctx, newDeployment(foo), metav1.UpdateOptions{FieldManager: FieldManager})
-	}
-
-	// If an error occurs during Update, we'll requeue the item so we can
-	// attempt processing again later. This could have been caused by a
-	// temporary network failure, or any other transient reason.
-	if err != nil {
-		return err
-	}
-
-	// Finally, we update the status block of the Foo resource to reflect the
-	// current state of the world
-	err = c.updateFooStatus(ctx, foo, deployment)
-	if err != nil {
-		return err
-	}
-
-	c.recorder.Event(foo, corev1.EventTypeNormal, SuccessSynced, MessageResourceSynced)
+	c.updateFooStatus(ctx, randomItem, &value)
+	c.recorder.Event(randomItem, corev1.EventTypeNormal, SuccessSynced, MessageResourceSynced)
 	return nil
 }
 
-func (c *Controller) updateFooStatus(ctx context.Context, foo *samplev1alpha1.Foo, deployment *appsv1.Deployment) error {
+func (c *Controller) getRandomValue(ctx context.Context, url *string, key *string) (string, error) {
+	logger := klog.FromContext(ctx)
+	client := &http.Client{}
+	req, err := http.NewRequest("GET", *url, nil)
+	if err != nil {
+		return "", err
+	}
+
+	req.Header.Set("X-Api-Key", c.apiKey)
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		logger.Error(err, "not able to send http request")
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+
+	var result []map[string]interface{}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return "", err
+	}
+
+	if len(result) == 0 {
+		return "", fmt.Errorf("empty response array")
+	}
+
+	value, ok := result[0][*key]
+	if !ok {
+		return "", fmt.Errorf("key '%s' not found in response", *key)
+	}
+
+	strVal, ok := value.(string)
+	if !ok {
+		return "", fmt.Errorf("key '%s' is not a string", *key)
+	}
+
+	return strVal, nil
+
+}
+
+func (c *Controller) updateFooStatus(ctx context.Context, randomItem *v1beta1.RandomItem, value *string) error {
 	// NEVER modify objects from the store. It's a read-only, local cache.
 	// You can use DeepCopy() to make a deep copy of original object and modify this copy
 	// Or create a copy manually for better performance
-	fooCopy := foo.DeepCopy()
-	fooCopy.Status.AvailableReplicas = deployment.Status.AvailableReplicas
+	randomItemCopy := randomItem.DeepCopy()
+	randomItemCopy.Status.Item = randomItem.Spec.Item
+	randomItemCopy.Status.Value = *value
 	// If the CustomResourceSubresources feature gate is not enabled,
 	// we must use Update instead of UpdateStatus to update the Status block of the Foo resource.
 	// UpdateStatus will not allow changes to the Spec of the resource,
 	// which is ideal for ensuring nothing other than resource status has been updated.
-	_, err := c.sampleclientset.SamplecontrollerV1alpha1().Foos(foo.Namespace).UpdateStatus(ctx, fooCopy, metav1.UpdateOptions{FieldManager: FieldManager})
+	_, err := c.randomclientset.SamplecontrollerV1beta1().RandomItems(randomItem.Namespace).UpdateStatus(ctx, randomItemCopy, metav1.UpdateOptions{FieldManager: FieldManager})
 	return err
 }
 
 // enqueueFoo takes a Foo resource and converts it into a namespace/name
 // string which is then put onto the work queue. This method should *not* be
 // passed resources of any type other than Foo.
-func (c *Controller) enqueueFoo(obj interface{}) {
+func (c *Controller) enqueueRandomItem(obj interface{}) {
 	if objectRef, err := cache.ObjectToName(obj); err != nil {
 		utilruntime.HandleError(err)
 		return
@@ -371,51 +364,13 @@ func (c *Controller) handleObject(obj interface{}) {
 			return
 		}
 
-		foo, err := c.foosLister.Foos(object.GetNamespace()).Get(ownerRef.Name)
+		randomitem, err := c.randomItemLister.RandomItems(object.GetNamespace()).Get(ownerRef.Name)
 		if err != nil {
 			logger.V(4).Info("Ignore orphaned object", "object", klog.KObj(object), "foo", ownerRef.Name)
 			return
 		}
 
-		c.enqueueFoo(foo)
+		c.enqueueRandomItem(randomitem)
 		return
-	}
-}
-
-// newDeployment creates a new Deployment for a Foo resource. It also sets
-// the appropriate OwnerReferences on the resource so handleObject can discover
-// the Foo resource that 'owns' it.
-func newDeployment(foo *samplev1alpha1.Foo) *appsv1.Deployment {
-	labels := map[string]string{
-		"app":        "nginx",
-		"controller": foo.Name,
-	}
-	return &appsv1.Deployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      foo.Spec.DeploymentName,
-			Namespace: foo.Namespace,
-			OwnerReferences: []metav1.OwnerReference{
-				*metav1.NewControllerRef(foo, samplev1alpha1.SchemeGroupVersion.WithKind("Foo")),
-			},
-		},
-		Spec: appsv1.DeploymentSpec{
-			Replicas: foo.Spec.Replicas,
-			Selector: &metav1.LabelSelector{
-				MatchLabels: labels,
-			},
-			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{
-					Labels: labels,
-				},
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{
-						{
-							Name:  "nginx",
-							Image: "nginx:latest",
-						},
-					},
-				},
-			},
-		},
 	}
 }

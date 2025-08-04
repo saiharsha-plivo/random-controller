@@ -18,23 +18,28 @@ package main
 
 import (
 	"flag"
+	"fmt"
+	"os"
+	"path/filepath"
 	"time"
 
+	"github.com/saiharsha/random-controller/pkg/signals"
 	kubeinformers "k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/klog/v2"
-	"k8s.io/sample-controller/pkg/signals"
+
 	// Uncomment the following line to load the gcp plugin (only required to authenticate against GKE clusters).
 	// _ "k8s.io/client-go/plugin/pkg/client/auth/gcp"
 
-	clientset "k8s.io/sample-controller/pkg/generated/clientset/versioned"
-	informers "k8s.io/sample-controller/pkg/generated/informers/externalversions"
+	clientset "github.com/saiharsha/random-controller/pkg/generated/clientset/versioned"
+	informers "github.com/saiharsha/random-controller/pkg/generated/informers/externalversions"
 )
 
 var (
 	masterURL  string
 	kubeconfig string
+	apiKey     string
 )
 
 func main() {
@@ -66,9 +71,8 @@ func main() {
 	kubeInformerFactory := kubeinformers.NewSharedInformerFactory(kubeClient, time.Second*30)
 	exampleInformerFactory := informers.NewSharedInformerFactory(exampleClient, time.Second*30)
 
-	controller := NewController(ctx, kubeClient, exampleClient,
-		kubeInformerFactory.Apps().V1().Deployments(),
-		exampleInformerFactory.Samplecontroller().V1alpha1().Foos())
+	controller := NewController(ctx, kubeClient, exampleClient, apiKey,
+		exampleInformerFactory.Samplecontroller().V1beta1().RandomItems())
 
 	// notice that there is no need to run Start methods in a separate goroutine. (i.e. go kubeInformerFactory.Start(ctx.done())
 	// Start method is non-blocking and runs all registered informers in a dedicated goroutine.
@@ -82,6 +86,14 @@ func main() {
 }
 
 func init() {
-	flag.StringVar(&kubeconfig, "kubeconfig", "", "Path to a kubeconfig. Only required if out-of-cluster.")
+	home, err := os.UserHomeDir()
+	if err != nil {
+		fmt.Println("Error getting home directory:", err)
+		return
+	}
+
+	kubeconfigPath := filepath.Join(home, ".kube", "config")
+	flag.StringVar(&kubeconfig, "kubeconfig", kubeconfigPath, "Path to a kubeconfig. Only required if out-of-cluster.")
 	flag.StringVar(&masterURL, "master", "", "The address of the Kubernetes API server. Overrides any value in kubeconfig. Only required if out-of-cluster.")
+	flag.StringVar(&apiKey, "apikey", "", "The api key to call the ninja api")
 }

@@ -19,15 +19,15 @@ limitations under the License.
 package fake
 
 import (
+	clientset "github.com/saiharsha/random-controller/pkg/generated/clientset/versioned"
+	samplecontrollerv1beta1 "github.com/saiharsha/random-controller/pkg/generated/clientset/versioned/typed/randomcontroller/v1beta1"
+	fakesamplecontrollerv1beta1 "github.com/saiharsha/random-controller/pkg/generated/clientset/versioned/typed/randomcontroller/v1beta1/fake"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/discovery"
 	fakediscovery "k8s.io/client-go/discovery/fake"
 	"k8s.io/client-go/testing"
-	clientset "k8s.io/sample-controller/pkg/generated/clientset/versioned"
-	samplecontrollerv1alpha1 "k8s.io/sample-controller/pkg/generated/clientset/versioned/typed/samplecontroller/v1alpha1"
-	fakesamplecontrollerv1alpha1 "k8s.io/sample-controller/pkg/generated/clientset/versioned/typed/samplecontroller/v1alpha1/fake"
 )
 
 // NewSimpleClientset returns a clientset that will respond with the provided objects.
@@ -88,7 +88,7 @@ var (
 	_ testing.FakeClient  = &Clientset{}
 )
 
-// SamplecontrollerV1alpha1 retrieves the SamplecontrollerV1alpha1Client
-func (c *Clientset) SamplecontrollerV1alpha1() samplecontrollerv1alpha1.SamplecontrollerV1alpha1Interface {
-	return &fakesamplecontrollerv1alpha1.FakeSamplecontrollerV1alpha1{Fake: &c.Fake}
+// SamplecontrollerV1beta1 retrieves the SamplecontrollerV1beta1Client
+func (c *Clientset) SamplecontrollerV1beta1() samplecontrollerv1beta1.SamplecontrollerV1beta1Interface {
+	return &fakesamplecontrollerv1beta1.FakeSamplecontrollerV1beta1{Fake: &c.Fake}
 }

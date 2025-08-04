@@ -1,6 +1,6 @@
 // This is a generated file. Do not edit directly.
 
-module k8s.io/sample-controller
+module github.com/saiharsha/random-controller
 
 go 1.24.0
 
